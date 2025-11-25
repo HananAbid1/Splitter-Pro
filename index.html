@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Splitter (Rock-Solid)</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- FFmpeg WASM (Using the highly stable v0.9.8) -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.9.8/dist/ffmpeg.min.js"></script>
+
+    <style>
+        .loader {
+            border-top-color: #3b82f6;
+            -webkit-animation: spinner 1.5s linear infinite;
+            animation: spinner 1.5s linear infinite;
+        }
+        @keyframes spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-slate-800 font-sans min-h-screen">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        // Use FFmpeg from the globally loaded script
+        const { createFFmpeg, fetchFile } = FFmpeg; 
+
+        function App() {
+            const [ffmpeg, setFfmpeg] = useState(null);
+            const [ready, setReady] = useState(false);
+            const [videoFile, setVideoFile] = useState(null);
+            const [videoDuration, setVideoDuration] = useState(0);
+            const [isDurationLoading, setIsDurationLoading] = useState(false);
+            const [mode, setMode] = useState('percentage'); 
+            const [splitValue, setSplitValue] = useState(25);
+            const [processing, setProcessing] = useState(false);
+            const [progress, setProgress] = useState(0);
+            const [logs, setLogs] = useState("Initializing...");
+            const [outputFiles, setOutputFiles] = useState([]);
+            const [error, setError] = useState(null);
+
+            // --- Engine Loading (Using 0.9.8 core path) ---
+            useEffect(() => {
+                const load = async () => {
+                    try {
+                        const ffmpegInstance = createFFmpeg({ 
+                            log: true,
+                            // This core path matches the 0.9.8 wrapper and is extremely reliable
+                            corePath: 'https://unpkg.com/@ffmpeg/core@0.9.8/dist/ffmpeg-core.js'
+                        });
+
+                        ffmpegInstance.setLogger(({ message }) => {
+                            setLogs(message);
+                            // Simple progress check for the core file download
+                            if (message.includes('loading script') && message.includes('ffmpeg-core.js')) {
+                                setLogs("Downloading core engine...");
+                            }
+                        });
+                        
+                        await ffmpegInstance.load();
+                        setFfmpeg(ffmpegInstance);
+                        setReady(true);
+                    } catch (e) {
+                        console.error("FFmpeg Load Error:", e);
+                        setError("Critical Engine Failure. Please try clearing your browser cache and refreshing. Error: " + e.message);
+                    }
+                };
+                load();
+            }, []);
+
+            // --- File Handling and Duration Fetching ---
+            const handleFileChange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                setVideoFile(file);
+                setVideoDuration(0); 
+                setOutputFiles([]);
+                setError(null);
+                setIsDurationLoading(true);
+
+                const video = document.createElement('video');
+                video.preload = 'metadata';
+                video.onerror = (e) => {
+                    console.error("Video element error:", e);
+                    setError("Could not read video file metadata. Try a different format.");
+                    setIsDurationLoading(false);
+                    window.URL.revokeObjectURL(video.src);
+                };
+
+                video.onloadedmetadata = () => {
+                    // Slight delay for mobile browsers to fully commit the duration
+                    setTimeout(() => {
+                        setVideoDuration(video.duration);
+                        setIsDurationLoading(false);
+                        window.URL.revokeObjectURL(video.src);
+                    }, 100); 
+                };
+                
+                // 5 second timeout if duration takes too long
+                const durationTimeout = setTimeout(() => {
+                    if (video.duration === 0 || isNaN(video.duration)) {
+                        setError("Duration could not be loaded quickly. Cannot split.");
+                        setIsDurationLoading(false);
+                        window.URL.revokeObjectURL(video.src);
+                    }
+                }, 5000); 
+
+                video.src = URL.createObjectURL(file);
+                
+                return () => clearTimeout(durationTimeout);
+            };
+
+            const calculateSegments = () => {
+                if (videoDuration < 1 || isDurationLoading) return []; 
+                let segmentDuration = 0;
+                
+                if (mode === 'percentage') {
+                    if (splitValue <= 0 || splitValue > 100) return [];
+                    const parts = 100 / splitValue;
+                    segmentDuration = videoDuration / parts;
+                } else {
+                    if (splitValue <= 0) return [];
+                    segmentDuration = parseFloat(splitValue);
+                }
+
+                const segments = [];
+                let currentTime = 0;
+                while (currentTime < videoDuration) {
+                    let end = currentTime + segmentDuration;
+                    if (end > videoDuration) end = videoDuration;
+                    segments.push({ start: currentTime, end: end, duration: end - currentTime });
+                    currentTime = end;
+                }
+                return segments;
+            };
+
+            const splitVideo = async () => {
+                if (!ffmpeg || !videoFile || videoDuration < 1) return;
+                setProcessing(true);
+                setProgress(0);
+                setOutputFiles([]);
+                setError(null);
+
+                try {
+                    const fileName = 'input.mp4';
+                    setLogs("Writing file to virtual memory (RAM)...");
+                    ffmpeg.FS('writeFile', fileName, await fetchFile(videoFile));
+
+                    const segments = calculateSegments();
+                    const generatedFiles = [];
+
+                    for (let i = 0; i < segments.length; i++) {
+                        const { start, duration } = segments[i];
+                        const outputName = `part_${i + 1}.mp4`;
+                        
+                        setProgress(Math.round(((i) / segments.length) * 100));
+                        setLogs(`Processing segment ${i + 1} of ${segments.length}...`);
+
+                        // The '-c copy' command is crucial for speed, as it avoids re-encoding.
+                        await ffmpeg.run(
+                            '-i', fileName, 
+                            '-ss', start.toString(), 
+                            '-t', duration.toString(), 
+                            '-c', 'copy', 
+                            outputName
+                        );
+
+                        const data = ffmpeg.FS('readFile', outputName);
+                        const blob = new Blob([data.buffer], { type: 'video/mp4' });
+                        const url = URL.createObjectURL(blob);
+                        
+                        generatedFiles.push({
+                            id: i,
+                            url: url,
+                            name: `part_${i + 1}.mp4`,
+                            duration: duration
+                        });
+
+                        ffmpeg.FS('unlink', outputName);
+                    }
+
+                    ffmpeg.FS('unlink', fileName);
+                    setOutputFiles(generatedFiles);
+                    setLogs("Finished! All parts are ready to download.");
+                    setProgress(100);
+
+                } catch (err) {
+                    console.error("Split Error:", err);
+                    setError("Split process failed. File might be too large or phone ran out of memory. Error: " + err.message);
+                } finally {
+                    setProcessing(false);
+                }
+            };
+
+            const segments = calculateSegments();
+            const isButtonDisabled = processing || isDurationLoading || segments.length === 0 || videoDuration < 1;
+
+            return (
+                <div className="max-w-md mx-auto bg-white min-h-screen shadow-xl overflow-hidden flex flex-col">
+                    <div className="bg-emerald-600 p-4 text-white shadow-md">
+                        <h1 className="text-xl font-bold">Video Splitter (Stable)</h1>
+                        <p className="text-xs text-emerald-100">Optimized for Mobile Compatibility</p>
+                    </div>
+
+                    <div className="p-4 flex-1 flex flex-col gap-6">
+                        {/* Engine Loading Status */}
+                        {!ready && !error && (
+                            <div className="flex flex-col items-center justify-center p-8 bg-gray-50 rounded-xl border border-gray-200">
+                                <div className="loader ease-linear rounded-full border-4 border-t-4 border-gray-400 h-8 w-8 mb-4"></div>
+                                <span className="text-gray-700 font-bold mb-2">Downloading Engine...</span>
+                                <p className="text-xs text-gray-400 font-mono text-center break-all px-4">{logs}</p>
+                            </div>
+                        )}
+
+                        {error && (
+                            <div className="bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 text-sm break-words">
+                                <strong>Error:</strong> {error}
+                            </div>
+                        )}
+
+                        {/* Upload State */}
+                        {ready && !videoFile && (
+                            <div className="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-2xl p-10 bg-gray-50 hover:bg-gray-100 transition cursor-pointer relative">
+                                <input type="file" accept="video/*" onChange={handleFileChange} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                <div className="bg-emerald-100 text-emerald-600 p-4 rounded-full mb-3">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                                </div>
+                                <p className="font-semibold text-gray-700">Upload Video</p>
+                            </div>
+                        )}
+
+                        {/* Configuration State */}
+                        {videoFile && !processing && outputFiles.length === 0 && (
+                            <div className="space-y-6">
+                                <div className="bg-emerald-50 p-4 rounded-xl flex justify-between border border-emerald-100">
+                                    <div className="overflow-hidden">
+                                        <p className="font-bold text-gray-800 truncate text-sm">{videoFile.name}</p>
+                                        <p className="text-xs text-gray-500">
+                                            {isDurationLoading ? (
+                                                <span className="text-emerald-700 font-bold flex items-center">
+                                                    <div className="loader ease-linear rounded-full border-2 border-t-2 border-gray-300 h-3 w-3 mr-2"></div>
+                                                    Fetching Duration...
+                                                </span>
+                                            ) : videoDuration > 0 ? (
+                                                `${videoDuration.toFixed(1)}s • ${(videoFile.size / (1024*1024)).toFixed(1)} MB`
+                                            ) : (
+                                                `Duration could not be read.`
+                                            )}
+                                        </p>
+                                    </div>
+                                    <button onClick={() => setVideoFile(null)} className="text-red-500 font-bold">✕</button>
+                                </div>
+
+                                <div className="bg-white p-1 rounded-xl">
+                                    <div className="flex bg-gray-100 p-1 rounded-lg mb-4">
+                                        <button onClick={() => setMode('percentage')} className={`flex-1 py-2 text-sm font-medium rounded-md transition ${mode === 'percentage' ? 'bg-white shadow text-emerald-600' : 'text-gray-500'}`}>Percentage</button>
+                                        <button onClick={() => setMode('seconds')} className={`flex-1 py-2 text-sm font-medium rounded-md transition ${mode === 'seconds' ? 'bg-white shadow text-emerald-600' : 'text-gray-500'}`}>Seconds</button>
+                                    </div>
+                                    <div className="flex items-center gap-2 mb-4">
+                                        <input type="number" value={splitValue} onChange={(e) => setSplitValue(e.target.value)} className="flex-1 p-3 border border-gray-300 rounded-lg text-lg font-bold text-center focus:ring-2 focus:ring-emerald-500 outline-none" />
+                                        <span className="text-gray-500 font-bold text-lg w-8">{mode === 'percentage' ? '%' : 's'}</span>
+                                    </div>
+                                    <div className="text-sm text-center text-gray-600 bg-gray-50 p-3 rounded-lg border border-gray-100">
+                                        Result: <span className="font-bold text-emerald-600">{segments.length > 0 ? `${segments.length} parts` : (isDurationLoading ? 'Calculating...' : 'Enter a valid duration/value')}</span>
+                                    </div>
+                                </div>
+
+                                <button onClick={splitVideo} disabled={isButtonDisabled} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 text-white font-bold py-4 rounded-xl shadow-lg transition active:scale-95">
+                                    {isDurationLoading ? "Awaiting Duration" : "Split Video"}
+                                </button>
+                                {videoDuration < 1 && !isDurationLoading && (
+                                    <p className="text-red-500 text-sm text-center">Cannot split until video duration is known.</p>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Processing State */}
+                        {processing && (
+                            <div className="flex flex-col items-center justify-center py-10">
+                                <div className="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-16 w-16 mb-6"></div>
+                                <h3 className="text-lg font-bold text-gray-800">Processing...</h3>
+                                <p className="text-sm text-gray-500 mb-4 font-mono">{logs}</p>
+                                <div className="w-full bg-gray-200 rounded-full h-2.5">
+                                    <div className="bg-emerald-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Download State */}
+                        {outputFiles.length > 0 && (
+                            <div className="space-y-4">
+                                <div className="flex justify-between">
+                                    <h3 className="font-bold text-lg">Download Parts</h3>
+                                    <button onClick={() => { setOutputFiles([]); setVideoFile(null); }} className="text-sm text-emerald-600 font-medium">Reset</button>
+                                </div>
+                                <div className="grid gap-3">
+                                    {outputFiles.map((part) => (
+                                        <div key={part.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between">
+                                            <span className="font-bold text-gray-700 text-sm">{part.name}</span>
+                                            <a href={part.url} download={part.name} className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow transition">Save</a>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
