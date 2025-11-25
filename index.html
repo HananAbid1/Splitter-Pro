@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video Splitter (Ultimate Stability)</title>
+    <title>Video Splitter (Final Stability)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -13,8 +13,8 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- FFmpeg WASM (Using highly compatible v0.10.1 from jsDelivr) -->
-    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.10.1/dist/ffmpeg.min.js"></script>
+    <!-- FFmpeg WASM (Using the reliable v0.11.6 wrapper) -->
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 
     <style>
         .loader {
@@ -49,27 +49,42 @@
             const [outputFiles, setOutputFiles] = useState([]);
             const [error, setError] = useState(null);
 
-            // --- Engine Loading (Using 0.10.1 core path) ---
+            // --- Engine Loading with Timeout ---
             useEffect(() => {
                 const load = async () => {
-                    try {
-                        const ffmpegInstance = createFFmpeg({ 
-                            log: true,
-                            // Use the core path that strictly matches the 0.10.1 wrapper
-                            corePath: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.10.1/dist/ffmpeg-core.js'
-                        });
+                    const loadPromise = new Promise(async (resolve, reject) => {
+                        try {
+                            const ffmpegInstance = createFFmpeg({ 
+                                log: true,
+                                // Using the unpkg CDN path for 0.11.6 core file
+                                corePath: 'https://unpkg.com/@ffmpeg/core@0.11.6/dist/ffmpeg-core.js'
+                            });
 
-                        ffmpegInstance.setLogger(({ message }) => {
-                            setLogs(message);
-                        });
-                        
-                        await ffmpegInstance.load();
-                        setFfmpeg(ffmpegInstance);
+                            ffmpegInstance.setLogger(({ message }) => {
+                                setLogs(message);
+                            });
+                            
+                            await ffmpegInstance.load();
+                            resolve(ffmpegInstance);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+
+                    // Set a 15-second timeout
+                    const timeoutPromise = new Promise((_, reject) => {
+                        setTimeout(() => {
+                            reject(new Error("Engine loading timed out (15s)."));
+                        }, 15000);
+                    });
+
+                    try {
+                        const result = await Promise.race([loadPromise, timeoutPromise]);
+                        setFfmpeg(result);
                         setReady(true);
                     } catch (e) {
                         console.error("FFmpeg Load Error:", e);
-                        // Suggest clearing cache as the solution
-                        setError("Critical Load Failure. **Please clear your mobile browser's cache** (Cached images and files) and refresh the page. Error: " + e.message);
+                        setError("Engine Load Failed: " + (e.message.includes("timed out") ? "Loading took too long. Try a different Wi-Fi or device." : e.message));
                     }
                 };
                 load();
@@ -203,8 +218,8 @@
             return (
                 <div className="max-w-md mx-auto bg-white min-h-screen shadow-xl overflow-hidden flex flex-col">
                     <div className="bg-emerald-600 p-4 text-white shadow-md">
-                        <h1 className="text-xl font-bold">Video Splitter (Stable)</h1>
-                        <p className="text-xs text-emerald-100">Optimized for Mobile Compatibility</p>
+                        <h1 className="text-xl font-bold">Video Splitter (Final)</h1>
+                        <p className="text-xs text-emerald-100">With 15s Load Timeout</p>
                     </div>
 
                     <div className="p-4 flex-1 flex flex-col gap-6">
@@ -219,7 +234,10 @@
 
                         {error && (
                             <div className="bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 text-sm break-words">
-                                <strong>Error:</strong> {error}
+                                <strong>Critical Error:</strong> {error}
+                                {error.includes("timed out") && (
+                                    <p className="mt-2 text-xs font-medium">This usually means your local network or phone is blocking the necessary files. Try switching from Wi-Fi to mobile data, or vice versa.</p>
+                                )}
                             </div>
                         )}
 
