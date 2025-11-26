@@ -66,14 +66,13 @@
 
           const handleVideoUpload = (e) => {
             const file = e.target.files[0];
-            if (file && (file.type.startsWith('video/') || file.name.match(/\.(mp4|mov|avi|mkv|webm)$/i))) {
+            if (file) {
               setVideo(file);
               const url = URL.createObjectURL(file);
               setVideoUrl(url);
               setSplitVideos([]);
               setProgress('');
               setError('');
-              setLogs([]);
               addLog(`Video loaded: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
             }
           };
@@ -110,51 +109,47 @@
             setProgress('Initializing...');
             setSplitVideos([]);
             setError('');
+            setLogs([]);
             addLog('Starting video split process...');
 
             try {
-              addLog('Loading FFmpeg library...');
-              setProgress('Loading FFmpeg library (this may take a moment)...');
+              addLog('Loading FFmpeg library from CDN...');
+              setProgress('Loading FFmpeg library (may take 10-30 seconds on first load)...');
               
               const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.7/dist/esm/index.js');
               const { fetchFile, toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
               
-              addLog('FFmpeg library loaded successfully');
+              addLog('✓ FFmpeg library loaded');
               addLog('Creating FFmpeg instance...');
               
               const ffmpeg = new FFmpeg();
               
               ffmpeg.on('log', ({ message }) => {
-                console.log('FFmpeg log:', message);
+                console.log('FFmpeg:', message);
               });
 
               ffmpeg.on('progress', ({ progress: p, time }) => {
                 const percent = Math.round(p * 100);
                 setProgress(`Processing: ${percent}%`);
-                addLog(`Progress: ${percent}% (time: ${time})`);
               });
 
-              addLog('Loading FFmpeg core files...');
+              addLog('Loading FFmpeg core (WASM files)...');
               setProgress('Loading FFmpeg core files...');
               
               const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
               
-              try {
-                await ffmpeg.load({
-                  coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-                  wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-                });
-                addLog('FFmpeg core loaded successfully');
-              } catch (loadError) {
-                addLog(`FFmpeg load error: ${loadError.message}`);
-                throw new Error(`Failed to load FFmpeg: ${loadError.message}`);
-              }
+              await ffmpeg.load({
+                coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+              });
+              
+              addLog('✓ FFmpeg core loaded successfully');
 
               setProgress('Reading video file...');
-              addLog('Writing video to FFmpeg filesystem...');
+              addLog('Writing video to FFmpeg virtual filesystem...');
               
               await ffmpeg.writeFile('input.mp4', await fetchFile(video));
-              addLog('Video file written successfully');
+              addLog('✓ Video file ready for processing');
 
               let partDuration;
               if (splitMode === 'percent') {
@@ -165,7 +160,7 @@
               }
 
               const numParts = Math.floor(duration / partDuration);
-              addLog(`Splitting into ${numParts} parts of ${partDuration.toFixed(2)} seconds each`);
+              addLog(`Will create ${numParts} parts of ~${partDuration.toFixed(2)}s each`);
               
               const parts = [];
 
@@ -174,7 +169,7 @@
                 const outputFile = `part${i + 1}.mp4`;
                 
                 setProgress(`Creating part ${i + 1} of ${numParts}...`);
-                addLog(`Processing part ${i + 1}: start=${startTime.toFixed(2)}s, duration=${partDuration.toFixed(2)}s`);
+                addLog(`Splitting part ${i + 1}: start=${startTime.toFixed(2)}s duration=${partDuration.toFixed(2)}s`);
 
                 await ffmpeg.exec([
                   '-i', 'input.mp4',
@@ -185,13 +180,13 @@
                   outputFile
                 ]);
 
-                addLog(`Part ${i + 1} processed, reading output file...`);
+                addLog(`✓ Part ${i + 1} encoded, reading file...`);
                 
                 const data = await ffmpeg.readFile(outputFile);
                 const blob = new Blob([data.buffer], { type: 'video/mp4' });
                 const url = URL.createObjectURL(blob);
                 
-                addLog(`Part ${i + 1} created successfully (${(blob.size / 1024 / 1024).toFixed(2)}MB)`);
+                addLog(`✓ Part ${i + 1} ready (${(blob.size / 1024 / 1024).toFixed(2)}MB)`);
                 
                 parts.push({
                   name: `Part ${i + 1}`,
@@ -202,22 +197,24 @@
               }
 
               setSplitVideos(parts);
-              setProgress(`✓ Successfully created ${numParts} parts!`);
-              addLog(`All parts created successfully!`);
-            } catch (error) {
-              console.error('Error splitting video:', error);
-              const errorMsg = `Error: ${error.message || 'Unknown error occurred'}`;
-              setError(errorMsg);
+              setProgress(`✓ Success! Created ${numParts} parts`);
+              addLog(`✓ All ${numParts} parts created successfully!`);
+            } catch (err) {
+              console.error('Split error:', err);
+              const errorMsg = err.message || 'Unknown error occurred';
+              setError(`Failed to split video: ${errorMsg}`);
               setProgress('');
-              addLog(`ERROR: ${error.message}`);
-              addLog(`Stack: ${error.stack}`);
+              addLog(`✗ ERROR: ${errorMsg}`);
+              if (err.stack) {
+                addLog(`Stack trace: ${err.stack.substring(0, 200)}`);
+              }
             } finally {
               setProcessing(false);
             }
           };
 
           const downloadPart = (part, index) => {
-            addLog(`Downloading part ${index + 1}...`);
+            addLog(`Downloading ${part.name}...`);
             const a = document.createElement('a');
             a.href = part.url;
             a.download = `video_part_${index + 1}.mp4`;
@@ -353,8 +350,9 @@
                       <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg flex gap-3">
                         <div className="w-5 h-5 text-red-600 flex-shrink-0"><AlertCircle /></div>
                         <div className="flex-1">
-                          <p className="text-red-800 font-medium">Error occurred</p>
+                          <p className="text-red-800 font-medium">Error</p>
                           <p className="text-red-700 text-sm mt-1">{error}</p>
+                          <p className="text-red-600 text-xs mt-2">Check debug logs below for details</p>
                         </div>
                       </div>
                     )}
@@ -372,7 +370,7 @@
                         Clear
                       </button>
                     </div>
-                    <div className="bg-black rounded-lg p-3 max-h-48 overflow-y-auto">
+                    <div className="bg-black rounded-lg p-3 max-h-64 overflow-y-auto">
                       {logs.map((log, i) => (
                         <div key={i} className="text-xs text-green-400 font-mono mb-1">
                           {log}
